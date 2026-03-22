@@ -1,6 +1,18 @@
+import re
 from datetime import datetime, timezone, timedelta
 
 SP = timezone(timedelta(hours=-3))
+
+
+def slugify(text: str, max_len: int = 60) -> str:
+    """Turn text into a filesystem-safe slug."""
+    text = text.strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    text = text.strip("-")
+    if len(text) > max_len:
+        text = text[:max_len].rsplit("-", 1)[0]
+    return text or "captura"
 
 
 def format_capture(
@@ -9,13 +21,16 @@ def format_capture(
     context: str = "",
     link: str = "",
     thumbnail: str = "",
+    title: str = "",
 ) -> tuple[str, str]:
     """Returns (filename, markdown_content)."""
     now = datetime.now(SP)
     timestamp = now.strftime("%Y-%m-%d_%H%M")
     date_display = now.strftime("%d/%m/%Y %H:%M")
 
-    filename = f"{timestamp}.md"
+    name_base = title or extracted_text.split("\n")[0] or "captura"
+    slug = slugify(name_base)
+    filename = f"{timestamp}_{slug}.md"
 
     parts = [f"## Captura - {date_display}\n"]
 

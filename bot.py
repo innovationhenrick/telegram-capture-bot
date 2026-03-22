@@ -31,14 +31,22 @@ def authorized(func):
     return wrapper
 
 
+def _save_to_github(filename: str, content: str, source: str) -> tuple[bool, str]:
+    path = f"{INBOX_PATH}/{filename}"
+    success = commit_file(
+        path=path,
+        content=content,
+        message=f"capture: {source} via telegram",
+    )
+    return success, path
+
+
 @authorized
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Bot de captura ativo.\n\n"
-        "Envie texto ou links e eu salvo no seu Obsidian.\n"
-        "Responda uma captura com contexto extra antes de salvar.\n\n"
-        "Comandos:\n"
-        "/salvar - salva a ultima captura pendente\n"
+        "Envie texto ou links e eu salvo direto no Obsidian.\n"
+        "Responda a mensagem de confirmacao com contexto extra.\n\n"
         "/start - mostra esta mensagem"
     )
 
@@ -54,7 +62,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if urls:
         url = urls[0]
         meta = fetch_meta(url)
-        extracted = meta.get("title", "")
+        title = meta.get("title", "") or url
+        extracted = title
         if meta.get("description"):
             extracted += f"\n\n{meta['description']}"
 
@@ -63,106 +72,92 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             extracted_text=extracted,
             link=url,
             thumbnail=meta.get("image", ""),
+            title=title,
         )
 
-        context.user_data["pending"] = {
-            "filename": filename,
-            "content": content,
-            "source": "link",
-        }
+        success, path = _save_to_github(filename, content, "link")
 
-        preview = f"Link capturado: {meta.get('title', url)}\n\nResponda com contexto ou /salvar para gravar."
-        await update.message.reply_text(preview)
+        if success:
+            context.user_data["last_save"] = {
+                "filename": filename,
+                "content": content,
+                "source": "link",
+                "title": title,
+                "link": url,
+                "thumbnail": meta.get("image", ""),
+            }
+            await update.message.reply_text(
+                f"Salvo: {title}\n`{path}`\n\nResponda com contexto extra se quiser.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("Erro ao salvar. Tente novamente.")
     else:
         clean = process_text(text)
+        first_line = clean.split("\n")[0][:80]
+
         filename, content = format_capture(
             source_type="texto",
             extracted_text=clean,
+            title=first_line,
         )
 
-        context.user_data["pending"] = {
-            "filename": filename,
-            "content": content,
-            "source": "texto",
-        }
+        success, path = _save_to_github(filename, content, "texto")
 
-        preview = f"Texto capturado ({len(clean)} chars).\n\nResponda com contexto ou /salvar para gravar."
-        await update.message.reply_text(preview)
+        if success:
+            context.user_data["last_save"] = {
+                "filename": filename,
+                "content": content,
+                "source": "texto",
+                "title": first_line,
+            }
+            await update.message.reply_text(
+                f"Salvo: {first_line}\n`{path}`\n\nResponda com contexto extra se quiser.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("Erro ao salvar. Tente novamente.")
 
 
 @authorized
 async def handle_reply_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return
-    pending = context.user_data.get("pending")
-    if not pending:
+
+    last = context.user_data.get("last_save")
+    if not last:
         await handle_message(update, context)
         return
 
-    extra_context = update.message.text or ""
-    if not extra_context.strip():
+    extra_context = (update.message.text or "").strip()
+    if not extra_context:
         return
 
     filename, content = format_capture(
-        source_type=pending["source"],
-        extracted_text=pending["content"].split("**Texto extraído:**\n")[-1].split("\n---")[0] if "**Texto extraído:**" in pending["content"] else "",
-        context=extra_context.strip(),
-        link=_extract_link(pending["content"]),
-        thumbnail=_extract_thumbnail(pending["content"]),
+        source_type=last["source"],
+        extracted_text=last.get("content", "").split("**Texto extraído:**\n")[-1].split("\n---")[0] if "**Texto extraído:**" in last.get("content", "") else last.get("title", ""),
+        context=extra_context,
+        link=last.get("link", ""),
+        thumbnail=last.get("thumbnail", ""),
+        title=last.get("title", ""),
     )
 
-    context.user_data["pending"] = {
-        "filename": filename,
-        "content": content,
-        "source": pending["source"],
-    }
-
-    await update.message.reply_text("Contexto adicionado. /salvar para gravar.")
-
-
-def _extract_link(content: str) -> str:
-    for line in content.split("\n"):
-        if line.startswith("**Link:**"):
-            return line.replace("**Link:**", "").strip()
-    return ""
-
-
-def _extract_thumbnail(content: str) -> str:
-    for line in content.split("\n"):
-        if line.startswith("**Thumbnail:**"):
-            url = line.replace("**Thumbnail:**", "").strip()
-            if url.startswith("![](") and url.endswith(")"):
-                return url[4:-1]
-            return url
-    return ""
-
-
-@authorized
-async def salvar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pending = context.user_data.get("pending")
-    if not pending:
-        await update.message.reply_text("Nenhuma captura pendente.")
-        return
-
-    path = f"{INBOX_PATH}/{pending['filename']}"
-    success = commit_file(
-        path=path,
-        content=pending["content"],
-        message=f"capture: {pending['source']} via telegram",
-    )
+    success, path = _save_to_github(filename, content, last["source"])
 
     if success:
-        context.user_data.pop("pending", None)
-        await update.message.reply_text(f"Salvo em `{path}`", parse_mode="Markdown")
+        context.user_data["last_save"]["content"] = content
+        await update.message.reply_text(
+            f"Atualizado com contexto: `{path}`",
+            parse_mode="Markdown",
+        )
     else:
-        await update.message.reply_text("Erro ao salvar. Tente novamente.")
+        await update.message.reply_text("Erro ao atualizar. Tente novamente.")
 
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("salvar", salvar))
 
     app.add_handler(MessageHandler(
         filters.REPLY & filters.TEXT & ~filters.COMMAND,
